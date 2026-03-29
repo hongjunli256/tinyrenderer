@@ -1,4 +1,35 @@
 #include"triangle.h"
+
+//很好简略SSAO代码已经完成了，不过现在是边绘制边zbuffer这肯定不行，接下来我对代码进行效率整理,以及错误修正
+
+// 全局：16个采样方向（只启动时算一次）
+const int SSAO_SAMPLE_COUNT = 16;
+vec3 g_ssao_samples[SSAO_SAMPLE_COUNT];
+
+void InitSSAOSamples()
+{
+    srand(12345);  // 固定随机种子，画面不闪
+    for (int i = 0; i < 16; i++)
+    {
+        // 随机方向 x(-1~1) y(-1~1) z(0~1) → 上半球
+        float x = (rand() % 1000) / 500.0f - 1.0f;
+        float y = (rand() % 1000) / 500.0f - 1.0f;
+        float z = (rand() % 1000) / 1000.0f;
+
+        // 归一化 = 变成单位向量
+        float len = sqrt(x * x + y * y + z * z);
+        x /= len; y /= len; z /= len;
+
+        // 越靠近中心采样越密 → 效果更自然
+        float scale = (float)i / 16.0f;
+        scale *= scale;
+        g_ssao_samples[i] = { x * scale, y * scale, z * scale };
+    }
+}
+// SSAO全局参数
+const float SSAO_RADIUS = 10.0f;
+const float SSAO_BIAS = 0.005f;
+
 mat<4, 4> Viewport, Perspective, ModelView;
 void lookat(const vec3 eye, const vec3 center, const vec3 up) {
     vec3 n = normalized(eye - center);
@@ -24,8 +55,6 @@ vec4 rot(const vec4& v) {
 vec4 persp(const vec4& v)
 {
     vec4 v_persp = Perspective * v;
-    //if (v_persp.w != 0)
-        //v_persp = v_persp / v_persp.w;
     return v_persp;
 }
 
@@ -186,10 +215,47 @@ void draw_triangle_color(triangle& tri, const PhongShader& shader, TGAImage& fra
                 double for_b = (double)ce2 /tri.dot[1].w;
                 vec3 bar = { for_a,for_b ,for_c };
                 bar = bar / (for_a + for_b + for_c);
+
+                // ========== 1.复用你已有的插值法线(完全现成，无重算) ==========
+                vec4 raw_n4 = tri.norm_gravity(bar[0], bar[1], bar[2]);
+                vec3 pixel_nor = { raw_n4.x, raw_n4.y, raw_n4.z };
+                pixel_nor = normalized(pixel_nor);
+
                 TGAColor color_more_real = shader.color(tri, bar, model_);
                 double z = (ndc[0].z * ce1 + ndc[1].z * ce2 + ndc[2].z * ce0) / (ce1 + ce2 + ce0);
 
-                int idx = bbminx + i + (bbminy + j) * width;
+                // ========== 2.内嵌精简SSAO 【无任何重复矩阵计算】 ==========
+                int px = bbminx + i;
+                int py = bbminy + j;
+                int idx = px + py * width;
+                float occlusion = 0.0f;
+                for (int s = 0; s < SSAO_SAMPLE_COUNT; s++)
+                {
+                    vec3 sample_dir = g_ssao_samples[s];
+                    // 翻转到法线半球
+                    if (sample_dir* pixel_nor< 0)
+                        sample_dir = { -sample_dir.x, -sample_dir.y, -sample_dir.z };
+
+                    // 屏幕邻域偏移采样(软渲染极简适配，复用屏幕空间，跳过世界重算)
+                    int off_x = (int)(sample_dir.x * SSAO_RADIUS);
+                    int off_y = (int)(sample_dir.y * SSAO_RADIUS);
+                    int spx = px + off_x;
+                    int spy = py + off_y;
+
+                    // 边界裁剪
+                    if (spx < 0 || spx >= width || spy < 0 || spy >= height) continue;
+
+                    // 直接读深度缓冲(你现成全局zbuffer)
+                    float sample_z = zbuffer_true[spx + spy * width];
+                    // 深度比对遮挡
+                    if ((sample_z - z) > SSAO_BIAS)
+                        occlusion += 1.0f;
+                }
+                float ao = 1.0f - (occlusion / (float)SSAO_SAMPLE_COUNT);
+                color_more_real[0] = std::min(255, (int)(color_more_real[0] * ao));
+                color_more_real[1] = std::min(255, (int)(color_more_real[1] * ao));
+                color_more_real[2] = std::min(255, (int)(color_more_real[2] * ao));
+
                 if (z > zbuffer_true[idx])
                 {
                     framebuffer.set(bbminx + i, bbminy + j, color_more_real);
@@ -365,11 +431,7 @@ void drop_zbuffer(TGAImage& zbuffer_img, std::vector<double>& zbuffer_true, int 
 }
 void build_obj_triangle(const Model &model, TGAImage& framebuffer, TGAImage& zbuffer_img, TGAImage& framebuffer_toon, std::vector<double>& zbuffer_true, std::vector<double>& zbuffer_true_shadow,const RenderSettings& setting)
 {
-   // Model model(obj_name_str);
-    //const vec3 eye = { 0,0,4 };
-    //const vec3 center = { 0,0,0 };
-    //const vec3 up = { 0,1,0 };
-    //const vec3 light_vec = { 1,1,1 };
+    InitSSAOSamples();
 
     lookat(setting.eye, setting.center, setting.up);
     perspective(norm(setting.eye - setting.center));
