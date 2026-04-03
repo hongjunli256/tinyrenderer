@@ -1,5 +1,5 @@
 #include <cmath>
-#include <vector>
+//#include <vector>
 #include<list>
 #include "triangle.h"
 #include "model.h"
@@ -32,7 +32,7 @@ struct RenderOutput {
         zbuf(w, h, 1, { 0,0,0,0 })
     {
         ztrue.assign(w * h, -511.0);
-        zshadow.assign(width_obj_shadow * height_obj_shadow, -511.0);
+        zshadow.assign(width_obj * height_obj, -511.0);
     }
 
     // «Â¿ÌŒ∆¿Ì
